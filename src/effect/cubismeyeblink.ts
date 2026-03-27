@@ -5,8 +5,8 @@
  * that can be found at https://www.live2d.com/eula/live2d-open-software-license-agreement_en.html.
  */
 
-import { CubismModel } from '../model/cubismmodel';
-import { CubismModelSettingsJson } from '../settings/cubismmodelsettingsjson';
+import { CubismModel } from "../model/cubismmodel";
+import { CubismModelSettingsJson } from "../settings/cubismmodelsettingsjson";
 
 /**
  * 自動まばたき機能
@@ -25,27 +25,19 @@ export class CubismEyeBlink {
   }
 
   /**
-   * まばたきの間隔の設定
-   * @param blinkingInterval まばたきの間隔の時間[秒]
-   */
-  public setBlinkingInterval(blinkingInterval: number): void {
-    this._blinkingIntervalSeconds = blinkingInterval;
-  }
-
-  /**
    * まばたきのモーションの詳細設定
    * @param closing   まぶたを閉じる動作の所要時間[秒]
    * @param closed    まぶたを閉じている動作の所要時間[秒]
    * @param opening   まぶたを開く動作の所要時間[秒]
    */
   public setBlinkingSetting(
-    closing: number,
-    closed: number,
-    opening: number
+    mean: number,
+    maximumDeviation: number,
+    timescale: number,
   ): void {
-    this._closingSeconds = closing;
-    this._closedSeconds = closed;
-    this._openingSeconds = opening;
+    this._mean = mean;
+    this._maximumDeviation = maximumDeviation;
+    this._timescale = timescale;
   }
 
   /**
@@ -71,75 +63,48 @@ export class CubismEyeBlink {
    */
   public updateParameters(model: CubismModel, deltaTimeSeconds: number): void {
     this._userTimeSeconds += deltaTimeSeconds;
-    let parameterValue: number;
-    let t = 0.0;
 
-    switch (this._blinkingState) {
-      case EyeState.EyeState_Closing:
-        t =
-          (this._userTimeSeconds - this._stateStartTimeSeconds) /
-          this._closingSeconds;
+    if (this._doBlink) {
+      // --- 待機状態（次のまばたきまで待機中）---
+      if (this._blinkingState === EyeState.Idling) {
+        this._phase -= deltaTimeSeconds;
 
-        if (t >= 1.0) {
-          t = 1.0;
-          this._blinkingState = EyeState.EyeState_Closed;
-          this._stateStartTimeSeconds = this._userTimeSeconds;
+        if (this._phase >= 0) {
+          // 目を開いたまま維持する
+          this.setEyes(model, 1.0);
+          return;
         }
 
-        parameterValue = 1.0 - t;
+        // まばたき開始
+        this._phase = -Math.PI / 2;
+        this._lastEyeOpen = 1.0;
+        this._blinkingState = EyeState.ClosingEyes;
+      }
 
-        break;
-      case EyeState.EyeState_Closed:
-        t =
-          (this._userTimeSeconds - this._stateStartTimeSeconds) /
-          this._closedSeconds;
+      // --- まばたきモーション ---
+      this._phase += deltaTimeSeconds * this._timescale;
 
-        if (t >= 1.0) {
-          this._blinkingState = EyeState.EyeState_Opening;
-          this._stateStartTimeSeconds = this._userTimeSeconds;
-        }
+      let eyeOpen = Math.abs(Math.sin(this._phase));
 
-        parameterValue = 0.0;
+      // 閉じる → 開く への遷移を検出
+      if (
+        this._blinkingState === EyeState.ClosingEyes &&
+        eyeOpen > this._lastEyeOpen
+      ) {
+        this._blinkingState = EyeState.OpeningEyes;
+      }
+      // 開く → 待機（まばたき完了）への遷移を検出
+      else if (
+        this._blinkingState === EyeState.OpeningEyes &&
+        eyeOpen < this._lastEyeOpen
+      ) {
+        eyeOpen = 1.0;
+        this._blinkingState = EyeState.Idling;
+        this._phase = this.determinNextBlinkingTiming();
+      }
 
-        break;
-      case EyeState.EyeState_Opening:
-        t =
-          (this._userTimeSeconds - this._stateStartTimeSeconds) /
-          this._openingSeconds;
-
-        if (t >= 1.0) {
-          t = 1.0;
-          this._blinkingState = EyeState.EyeState_Interval;
-          this._nextBlinkingTime = this.determinNextBlinkingTiming();
-        }
-
-        parameterValue = t;
-
-        break;
-      case EyeState.EyeState_Interval:
-        if (this._nextBlinkingTime < this._userTimeSeconds) {
-          this._blinkingState = EyeState.EyeState_Closing;
-          this._stateStartTimeSeconds = this._userTimeSeconds;
-        }
-
-        parameterValue = 1.0;
-
-        break;
-      case EyeState.EyeState_First:
-      default:
-        this._blinkingState = EyeState.EyeState_Interval;
-        this._nextBlinkingTime = this.determinNextBlinkingTiming();
-
-        parameterValue = 1.0;
-        break;
-    }
-
-    if (!CubismEyeBlink.CloseIfZero) {
-      parameterValue = -parameterValue;
-    }
-
-    for (let i = 0; i < this._parameterIds.length; ++i) {
-      model.setParameterValueById(this._parameterIds[i], parameterValue);
+      this.setEyes(model, eyeOpen);
+      this._lastEyeOpen = eyeOpen;
     }
   }
 
@@ -148,15 +113,16 @@ export class CubismEyeBlink {
    * @param modelSetting モデルの設定情報
    */
   public constructor(modelSetting: CubismModelSettingsJson) {
-    this._blinkingState = EyeState.EyeState_First;
-    this._nextBlinkingTime = 0.0;
-    this._stateStartTimeSeconds = 0.0;
-    this._blinkingIntervalSeconds = 4.0;
-    this._closingSeconds = 0.1;
-    this._closedSeconds = 0.05;
-    this._openingSeconds = 0.15;
+    this._blinkingState = EyeState.Idling;
     this._userTimeSeconds = 0.0;
     this._parameterIds = [];
+    this._doBlink = true;
+    this._mean = 2.5;
+    this._maximumDeviation = 2.0;
+    this._timescale = 10.0;
+    this._phase = 0.0;
+    this._lastEyeOpen = 1.0;
+    this._parameterVals = {};
 
     if (modelSetting == null) {
       return;
@@ -173,20 +139,34 @@ export class CubismEyeBlink {
    */
   public determinNextBlinkingTiming(): number {
     const r: number = Math.random();
-    return (
-      this._userTimeSeconds + r * (2.0 * this._blinkingIntervalSeconds - 1.0)
-    );
+    return this._mean + (r * 2 - 1) * this._maximumDeviation;
+  }
+
+  /**
+   * 目のパラメータ値を設定する
+   * @param model 対象のモデル
+   * @param value 目の開き具合（0.0: 閉じている, 1.0: 開いている）
+   */
+  public setEyes(model: CubismModel, value: number) {
+    for (let i = 0; i < this._parameterIds.length; ++i) {
+      model.setParameterValueById(
+        this._parameterIds[i],
+        // adjust blink value for current expressions parameter value
+        value * (this._parameterVals[this._parameterIds[i]] ?? 1),
+      );
+    }
   }
 
   _blinkingState: number; // 現在の状態
   _parameterIds: string[]; // 操作対象のパラメータのIDのリスト
-  _nextBlinkingTime: number; // 次のまばたきの時刻[秒]
-  _stateStartTimeSeconds: number; // 現在の状態が開始した時刻[秒]
-  _blinkingIntervalSeconds: number; // まばたきの間隔[秒]
-  _closingSeconds: number; // まぶたを閉じる動作の所要時間[秒]
-  _closedSeconds: number; // まぶたを閉じている動作の所要時間[秒]
-  _openingSeconds: number; // まぶたを開く動作の所要時間[秒]
   _userTimeSeconds: number; // デルタ時間の積算値[秒]
+  _doBlink: boolean; // まばたきを有効にするかどうかのフラグ
+  _mean: number; // まばたきの平均間隔[秒]
+  _maximumDeviation: number; // まばたきの間隔の最大偏差[秒]
+  _timescale: number; // まばたきの速度倍率
+  _phase: number; // まばたきモーションの現在位相[ラジアン]
+  _lastEyeOpen: number; // 直前フレームの目の開き具合（状態遷移の検出に使用）
+  _parameterVals: Record<string, number>; // パラメータIDをキー、表情による目の開き具合の乗数を値とするマップ
 
   /**
    * IDで指定された目のパラメータが、0のときに閉じるなら true 、1の時に閉じるなら false 。
@@ -200,9 +180,7 @@ export class CubismEyeBlink {
  * まばたきの状態を表す列挙型
  */
 export enum EyeState {
-  EyeState_First = 0, // 初期状態
-  EyeState_Interval, // まばたきしていない状態
-  EyeState_Closing, // まぶたが閉じていく途中の状態
-  EyeState_Closed, // まぶたが閉じている状態
-  EyeState_Opening, // まぶたが開いていく途中の状態
+  Idling,
+  ClosingEyes,
+  OpeningEyes,
 }
